@@ -3,17 +3,23 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import os
+import sys
 import threading
 import webbrowser
 from dataclasses import dataclass
 from datetime import date, timedelta
 from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from dash import ALL, Dash, Input, Output, State, callback_context, dcc, html, no_update
 from werkzeug.exceptions import HTTPException
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from import_storage import load_import, save_import, storage_enabled
 
 
 LOGGER = logging.getLogger(__name__)
@@ -341,6 +347,17 @@ def prepare_data(frame: pd.DataFrame) -> pd.DataFrame:
             "Paiements \u00e0 temps (nb)": "paiements_temps",
         }
     )
+    aliases.update(
+        {
+            "Total collecte (FCFA)": "total_collecte",
+            "Nombre de beneficiaires": "nombre_beneficiaires",
+            "Nombre beneficiaires (nb)": "nombre_beneficiaires",
+            "Beneficiaires actifs (nb)": "beneficiaires_actifs",
+            "Beneficiaires initial (nb)": "beneficiaires_initial",
+            "Revenus apres projet (FCFA)": "revenus_apres",
+            "Paiements a temps (nb)": "paiements_temps",
+        }
+    )
     prepared = prepared.rename(columns={k: v for k, v in aliases.items() if k in prepared.columns})
     if prepared.columns.duplicated().any():
         deduped = pd.DataFrame(index=prepared.index)
@@ -460,6 +477,11 @@ def make_sample_voiture_report(frame: pd.DataFrame) -> pd.DataFrame:
 SAMPLE_DATA = prepare_data(make_sample_data())
 VOITURE_REPORT_DATA = make_sample_voiture_report(SAMPLE_DATA)
 DATA_VERSION = 0
+
+_STORED_IMPORT = load_import("taxi")
+if _STORED_IMPORT is not None:
+    SAMPLE_DATA = prepare_data(_STORED_IMPORT.sample_data)
+    VOITURE_REPORT_DATA = prepare_voiture_report(_STORED_IMPORT.report_data)
 
 
 def period_options() -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
@@ -658,7 +680,6 @@ def indicators_for_group(group: str, mode: str | None = None) -> list[Indicator]
 
 def indicator_options(group: str, mode: str | None = None) -> list[dict[str, str]]:
     return [{"label": indicator.name, "value": indicator.key} for indicator in indicators_for_group(group, mode)]
-
 
 
 # Map hidden groups (removed from GROUPS) to visible ones for dashboard rendering
@@ -1811,16 +1832,17 @@ def layout() -> html.Div:
                 [
                     html.Div(
                         [
-                            html.H1("YUNUS CAM-VOITURE"),
-                            html.P("Accueil, blocs KPI, alertes, comparaisons quotidiennes, hebdomadaires et mensuelles."),
+                            html.H1("YUNUS CAM-TAXI"),
+                            html.P("Dashboard Taxi/Voitures: KPI, alertes, import Excel et comparaisons par frequence."),
                         ]
                     ),
                     html.Div(
                         [
                             dcc.Upload(id="data-upload", children=html.Button("Importer Excel", className="secondary-button"), accept=".xlsx", multiple=False),
-                            html.A("Modèle Excel", href="/assets/modele_kpi_multifeuilles_mis_a_jour.xlsx", className="template-link"),
+                            html.A("Modele Excel Taxi", href="/assets/modele_kpi_taxi_par_frequence.xlsx", className="template-link"),
                             html.Button("Mois précédent", id="previous-month-button", n_clicks=0, className="secondary-button"),
                             html.Button("Accueil", id="home-button", n_clicks=0, className="secondary-button", disabled=True),
+                            html.A("Choix dashboards", href="http://127.0.0.1:8060", className="template-link"),
                         ],
                         className="header-actions",
                     ),
@@ -1865,11 +1887,15 @@ def layout() -> html.Div:
     )
 
 
-app = Dash(__name__)
-app.title = "YUNUS CAM-VOITURE"
-app.config.suppress_callback_exceptions = True
-app.server.config.update(PROPAGATE_EXCEPTIONS=False)
-app.enable_dev_tools(
+dash_app = Dash(
+    __name__,
+    requests_pathname_prefix=os.environ.get("DASH_REQUESTS_PREFIX", "/"),
+    assets_folder=os.path.join(os.path.dirname(__file__), "assets"),
+)
+dash_app.title = "YUNUS CAM-TAXI"
+dash_app.config.suppress_callback_exceptions = True
+dash_app.server.config.update(PROPAGATE_EXCEPTIONS=False)
+dash_app.enable_dev_tools(
     debug=False,
     dev_tools_ui=False,
     dev_tools_props_check=False,
@@ -1877,17 +1903,18 @@ app.enable_dev_tools(
     dev_tools_serve_dev_bundles=False,
     dev_tools_prune_errors=True,
 )
-app.layout = layout
+dash_app.layout = layout
+app = dash_app.server
 
 
-@app.server.after_request
+@dash_app.server.after_request
 def force_utf8_charset(response):
     if response.mimetype in {"text/html", "application/json"}:
         response.content_type = f"{response.mimetype}; charset=utf-8"
     return response
 
 
-@app.server.errorhandler(Exception)
+@dash_app.server.errorhandler(Exception)
 def handle_unexpected_error(exc: Exception):
     if isinstance(exc, HTTPException):
         return exc
@@ -1895,7 +1922,7 @@ def handle_unexpected_error(exc: Exception):
     return "Erreur interne. Consultez les journaux du serveur.", 500
 
 
-@app.callback(
+@dash_app.callback(
     Output("selected-page", "data"),
     Output("group-filter", "value"),
     Output("requested-indicator", "data"),
@@ -1950,7 +1977,7 @@ def navigate(home_clicks: int, previous_month_clicks: int, group_clicks: list[in
     return selected_page, current_group, no_update, selected_page == "accueil", selected_page == "previous-month"
 
 
-@app.callback(
+@dash_app.callback(
     Output("indicator-filter", "options"),
     Output("indicator-filter", "value"),
     Input("group-filter", "value"),
@@ -1972,7 +1999,7 @@ def sync_indicator(group: str, mode: str, requested_indicator: str | None, selec
     return options, options[0]["value"]
 
 
-@app.callback(
+@dash_app.callback(
     Output("period-mode", "options"),
     Output("period-mode", "value"),
     Input("group-filter", "value"),
@@ -1992,7 +2019,7 @@ def sync_frequency(group: str, requested_indicator: str | None, current_mode: st
     return options, options[0]["value"]
 
 
-@app.callback(
+@dash_app.callback(
     Output("month-filter", "options"),
     Output("month-filter", "value"),
     Output("week-filter", "options"),
@@ -2007,7 +2034,7 @@ def refresh_filters(refresh: int):
     return months, default_month, weeks, default_week, days, default_day
 
 
-@app.callback(
+@dash_app.callback(
     Output("upload-status", "children"),
     Output("upload-refresh", "data"),
     Input("data-upload", "contents"),
@@ -2053,6 +2080,13 @@ def import_data(contents: str | None, filename: str | None, refresh: int):
             "B\u00e9n\u00e9ficiaires initial (nb)",
             "Revenus apr\u00e8s projet (FCFA)",
             "Paiements \u00e0 temps (nb)",
+            "Total collecte (FCFA)",
+            "Nombre de beneficiaires",
+            "Nombre beneficiaires (nb)",
+            "Beneficiaires actifs (nb)",
+            "Beneficiaires initial (nb)",
+            "Revenus apres projet (FCFA)",
+            "Paiements a temps (nb)",
         }
         for sheet_name, sheet in sheets.items():
             if str(sheet_name).strip().lower() == "kpi hebdo":
@@ -2103,13 +2137,15 @@ def import_data(contents: str | None, filename: str | None, refresh: int):
         DATA_VERSION += 1
         indicator_timeseries_cached.cache_clear()
         involved_timeseries_cached.cache_clear()
-        return f"Import reussi: {filename} ({len(SAMPLE_DATA)} lignes).", refresh + 1
+        persisted = save_import("taxi", SAMPLE_DATA, VOITURE_REPORT_DATA)
+        persistence_note = " Sauvegarde base active." if persisted else (" Sauvegarde base inactive: DATABASE_URL absent." if not storage_enabled() else " Sauvegarde base impossible.")
+        return f"Import reussi: {filename} ({len(SAMPLE_DATA)} lignes).{persistence_note}", refresh + 1
     except Exception as exc:
         LOGGER.exception("Import Excel impossible")
         return "Import impossible: le fichier ne correspond pas au modele attendu.", refresh
 
 
-@app.callback(
+@dash_app.callback(
     Output("voiture-report-detail", "children"),
     Input("voiture-search", "value"),
     Input("report-frequency", "value"),
@@ -2118,7 +2154,7 @@ def update_voiture_report_detail(voiture_id: str | None, mode: str):
     return render_voiture_report_detail(voiture_id, mode or "daily")
 
 
-@app.callback(
+@dash_app.callback(
     Output("page-content", "children"),
     Output("day-filter", "disabled"),
     Output("week-filter", "disabled"),
@@ -2150,8 +2186,8 @@ def render_page(selected_page: str, group: str, indicator_key: str, selected_mon
                     html.Div(
                         [
                             html.Span("Accueil", className="eyebrow"),
-                            html.H2("Vue générale des indicateurs"),
-                            html.P(f"État général calculé sur la période sélectionnée: {current_label}. Cliquez sur un bloc pour ouvrir son dashboard."),
+                            html.H2("Vue generale des indicateurs"),
+                            html.P(f"Etat general calcule sur la periode selectionnee: {current_label}. Cliquez sur un bloc pour ouvrir son dashboard."),
                         ],
                         className="section-title home-title",
                     ),
@@ -2162,12 +2198,11 @@ def render_page(selected_page: str, group: str, indicator_key: str, selected_mon
             True,
             True,
             False,
-            "Accueil: le mois reste actif pour calculer l'état général des blocs.",
+            "Accueil: le mois reste actif pour calculer l'etat general des blocs.",
             "sidebar is-hidden",
             {},
             "shell home-shell",
         )
-
     if selected_page == "previous-month":
         selected_month_start = pd.to_datetime(selected_month + "-01")
         previous_month = selected_month_start - pd.DateOffset(months=1)
@@ -2474,7 +2509,7 @@ def render_page(selected_page: str, group: str, indicator_key: str, selected_mon
     )
 
 
-app.index_string = """
+dash_app.index_string = """
 <!DOCTYPE html>
 <html>
     <head>
@@ -2612,8 +2647,9 @@ app.index_string = """
 if __name__ == "__main__":
     url = "http://127.0.0.1:8061"
     print(f"Ouvrir le dashboard: {url}")
-    threading.Timer(1.0, lambda: webbrowser.open_new(url)).start()
-    app.run(
+    if os.environ.get("DASHBOARD_CHILD_PROCESS") != "1":
+        threading.Timer(1.0, lambda: webbrowser.open_new(url)).start()
+    dash_app.run(
         debug=False,
         host="127.0.0.1",
         port=8061,
