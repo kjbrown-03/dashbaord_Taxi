@@ -19,7 +19,7 @@ from dash import ALL, Dash, Input, Output, State, callback_context, dcc, html, n
 from werkzeug.exceptions import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from import_storage import load_import, save_import, storage_enabled
+from import_storage import load_import, save_import, storage_enabled, storage_status
 
 
 LOGGER = logging.getLogger(__name__)
@@ -28,6 +28,10 @@ ACCENT = "#0f766e"
 WARNING = "#b7791f"
 DANGER = "#b91c1c"
 INFO = "#475569"
+DASHBOARD_SELECTOR_URL = os.environ.get(
+    "DASHBOARD_SELECTOR_URL",
+    "/" if os.environ.get("VERCEL") or os.environ.get("DASH_REQUESTS_PREFIX") else "http://127.0.0.1:8060",
+)
 
 
 @dataclass(frozen=True)
